@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field
 import os
 import logging
 from pathlib import Path
@@ -20,7 +21,7 @@ from integrations import twilio_client, openai_processor, supabase_storage
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection (temporary until Postgres/Supabase configured)
+# MongoDB connection (easy to migrate to Postgres/Supabase later)
 mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ.get('DB_NAME', 'tourtext')]
@@ -37,6 +38,24 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# PYDANTIC MODELS
+# ============================================================================
+
+class TourCreate(BaseModel):
+    tour_name: str
+    tour_code: Optional[str] = None
+    start_date: str
+    multi_tour_access: bool = False
+
+class SourceFileUpload(BaseModel):
+    file_type: str
+
+class QueryRequest(BaseModel):
+    tour_code: str
+    query: str
+    phone_number: Optional[str] = None
 
 # ============================================================================
 # HEALTH CHECK
@@ -62,8 +81,8 @@ async def health_check():
 # TOUR ENDPOINTS
 # ============================================================================
 
-@api_router.post("/tours", response_model=TourResponse)
-async def create_tour(tour: TourCreate, db: Session = Depends(get_db)):
+@api_router.post("/tours")
+async def create_tour(tour: TourCreate):
     """Create new tour"""
     try:
         # Generate IDs
@@ -74,38 +93,45 @@ async def create_tour(tour: TourCreate, db: Session = Depends(get_db)):
         if not tour.tour_code:
             tour.tour_code = generate_tour_code(tour.tour_name)
         
-        # Create tour
-        db_tour = Tour(
-            id=tour_id,
-            tid=tid,
-            tour_name=tour.tour_name,
-            tour_code=tour.tour_code,
-            start_date=tour.start_date,
-            multi_tour_access=tour.multi_tour_access
-        )
+        # Create tour document
+        tour_doc = {
+            "id": tour_id,
+            "tid": tid,
+            "tour_name": tour.tour_name,
+            "tour_code": tour.tour_code,
+            "start_date": tour.start_date,
+            "multi_tour_access": tour.multi_tour_access,
+            "status": "active",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None
+        }
         
-        db.add(db_tour)
-        db.commit()
-        db.refresh(db_tour)
+        await db.tours.insert_one(tour_doc)
         
         logger.info(f"Created tour: {tid} ({tour.tour_code})")
-        return db_tour
+        
+        # Remove MongoDB _id before returning
+        tour_doc.pop('_id', None)
+        return tour_doc
     
     except Exception as e:
-        db.rollback()
         logger.error(f"Failed to create tour: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.get("/tours", response_model=List[TourResponse])
-async def list_tours(db: Session = Depends(get_db)):
-    """List all tours"""
-    tours = db.query(Tour).filter(Tour.status == "active").order_by(Tour.created_at.desc()).all()
-    return tours
+@api_router.get("/tours")
+async def list_tours():
+    """List all active tours"""
+    try:
+        tours = await db.tours.find({"status": "active"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+        return tours
+    except Exception as e:
+        logger.error(f"Failed to list tours: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.get("/tours/{tour_id}", response_model=TourResponse)
-async def get_tour(tour_id: str, db: Session = Depends(get_db)):
+@api_router.get("/tours/{tour_id}")
+async def get_tour(tour_id: str):
     """Get tour by ID"""
-    tour = db.query(Tour).filter(Tour.id == tour_id).first()
+    tour = await db.tours.find_one({"id": tour_id}, {"_id": 0})
     if not tour:
         raise HTTPException(status_code=404, detail="Tour not found")
     return tour
@@ -114,25 +140,19 @@ async def get_tour(tour_id: str, db: Session = Depends(get_db)):
 # FILE UPLOAD ENDPOINTS
 # ============================================================================
 
-@api_router.post("/tours/{tour_id}/upload", response_model=SourceFileResponse)
+@api_router.post("/tours/{tour_id}/upload")
 async def upload_file(
     tour_id: str,
     file: UploadFile = File(...),
     file_type: str = Form(...),
-    background_tasks: BackgroundTasks = None,
-    db: Session = Depends(get_db)
+    background_tasks: BackgroundTasks = None
 ):
     """
     Upload source file (Master Tour, Eventbrite, PDF, etc.)
-    
-    Args:
-        tour_id: Tour UUID
-        file: Uploaded file
-        file_type: Type (mastertour, eventbrite, onesheet, routing, settlement, etc.)
     """
     try:
         # Verify tour exists
-        tour = db.query(Tour).filter(Tour.id == tour_id).first()
+        tour = await db.tours.find_one({"id": tour_id})
         if not tour:
             raise HTTPException(status_code=404, detail="Tour not found")
         
@@ -141,13 +161,14 @@ async def upload_file(
         file_hash_str = hash_file(file_content)
         
         # Check for duplicate
-        existing = db.query(SourceFile).filter(
-            SourceFile.tour_id == tour_id,
-            SourceFile.file_hash == file_hash_str
-        ).first()
+        existing = await db.source_files.find_one({
+            "tour_id": tour_id,
+            "file_hash": file_hash_str
+        })
         
         if existing:
             logger.warning(f"Duplicate file detected: {file.filename}")
+            existing.pop('_id', None)
             return existing
         
         # Generate IDs
@@ -155,131 +176,117 @@ async def upload_file(
         taid = generate_taid("TAID-TT-SRC")
         
         # Upload to storage
-        storage_path = f"tours/{tour.tour_code}/{file_type}/{file.filename}"
-        file_url = await supabase_storage.upload_file(storage_path, file_content, file.content_type)
+        storage_path = f"tours/{tour['tour_code']}/{file_type}/{file.filename}"
+        file_url = await supabase_storage.upload_file(storage_path, file_content, file.content_type or "application/octet-stream")
         
         # Create source file record
-        db_file = SourceFile(
-            id=file_id,
-            taid=taid,
-            tour_id=tour_id,
-            file_name=file.filename,
-            file_type=file_type,
-            file_path=file_url or storage_path,
-            file_hash=file_hash_str,
-            file_size=len(file_content),
-            mime_type=file.content_type
-        )
+        file_doc = {
+            "id": file_id,
+            "taid": taid,
+            "tour_id": tour_id,
+            "file_name": file.filename,
+            "file_type": file_type,
+            "file_path": file_url or storage_path,
+            "file_hash": file_hash_str,
+            "file_size": len(file_content),
+            "mime_type": file.content_type,
+            "upload_date": datetime.now(timezone.utc).isoformat(),
+            "processed": False,
+            "processing_error": None,
+            "extracted_metadata": None,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
         
-        db.add(db_file)
-        db.commit()
-        db.refresh(db_file)
+        await db.source_files.insert_one(file_doc)
         
         logger.info(f"Uploaded file: {taid} ({file.filename})")
         
         # Process file in background
         if background_tasks:
-            background_tasks.add_task(process_uploaded_file, file_id, file_content, db)
+            background_tasks.add_task(process_uploaded_file, file_id, file_content)
         
-        return db_file
+        file_doc.pop('_id', None)
+        return file_doc
     
     except Exception as e:
-        db.rollback()
         logger.error(f"Failed to upload file: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.get("/tours/{tour_id}/files", response_model=List[SourceFileResponse])
-async def list_tour_files(tour_id: str, db: Session = Depends(get_db)):
+@api_router.get("/tours/{tour_id}/files")
+async def list_tour_files(tour_id: str):
     """List all files for a tour"""
-    files = db.query(SourceFile).filter(SourceFile.tour_id == tour_id).order_by(SourceFile.upload_date.desc()).all()
+    files = await db.source_files.find({"tour_id": tour_id}, {"_id": 0}).sort("upload_date", -1).to_list(100)
     return files
 
 # ============================================================================
 # TRUTH RECORD ENDPOINTS
 # ============================================================================
 
-@api_router.post("/truth-records", response_model=TruthRecordResponse)
-async def create_truth_record(record: TruthRecordCreate, db: Session = Depends(get_db)):
+@api_router.post("/truth-records")
+async def create_truth_record(
+    tour_id: str = Form(...),
+    record_type: str = Form(...),
+    data: str = Form(...),  # JSON string
+    source_file_ids: str = Form(...),  # JSON array string
+    confidence: float = Form(1.0),
+    threshold_applied: float = Form(0.8)
+):
     """Create truth record"""
     try:
+        import json
+        
         # Generate IDs
         record_id = generate_uuid()
         taid = generate_taid("TAID-TT-TRUTH")
         
+        # Parse JSON strings
+        data_obj = json.loads(data)
+        source_ids = json.loads(source_file_ids)
+        
         # Create truth record
-        db_record = TruthRecord(
-            id=record_id,
-            taid=taid,
-            tour_id=record.tour_id,
-            record_type=record.record_type,
-            data=record.data,
-            confidence=record.confidence,
-            threshold_applied=record.threshold_applied,
-            search_keywords=record.search_keywords
-        )
+        record_doc = {
+            "id": record_id,
+            "taid": taid,
+            "tour_id": tour_id,
+            "record_type": record_type,
+            "schema_version": "1.0",
+            "record_status": "draft",
+            "data": data_obj,
+            "confidence": confidence,
+            "threshold_applied": threshold_applied,
+            "source_file_ids": source_ids,
+            "search_keywords": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None
+        }
         
-        # Link to source files
-        if record.source_file_ids:
-            source_files = db.query(SourceFile).filter(SourceFile.id.in_(record.source_file_ids)).all()
-            db_record.source_files.extend(source_files)
+        await db.truth_records.insert_one(record_doc)
         
-        db.add(db_record)
-        db.commit()
-        db.refresh(db_record)
+        logger.info(f"Created truth record: {taid} (type: {record_type})")
         
-        logger.info(f"Created truth record: {taid} (type: {record.record_type})")
-        return db_record
+        record_doc.pop('_id', None)
+        return record_doc
     
     except Exception as e:
-        db.rollback()
         logger.error(f"Failed to create truth record: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@api_router.get("/tours/{tour_id}/truth-records", response_model=List[TruthRecordResponse])
-async def list_truth_records(
-    tour_id: str,
-    record_type: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
+@api_router.get("/tours/{tour_id}/truth-records")
+async def list_truth_records(tour_id: str, record_type: Optional[str] = None):
     """List truth records for a tour"""
-    query = db.query(TruthRecord).filter(TruthRecord.tour_id == tour_id)
-    
+    query = {"tour_id": tour_id}
     if record_type:
-        query = query.filter(TruthRecord.record_type == record_type)
+        query["record_type"] = record_type
     
-    records = query.order_by(TruthRecord.created_at.desc()).all()
+    records = await db.truth_records.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
     return records
-
-@api_router.patch("/truth-records/{record_id}", response_model=TruthRecordResponse)
-async def update_truth_record(
-    record_id: str,
-    update: TruthRecordUpdate,
-    db: Session = Depends(get_db)
-):
-    """Update truth record status or data"""
-    record = db.query(TruthRecord).filter(TruthRecord.id == record_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Truth record not found")
-    
-    if update.record_status:
-        record.record_status = update.record_status
-    if update.data:
-        record.data = update.data
-    if update.confidence:
-        record.confidence = update.confidence
-    
-    db.commit()
-    db.refresh(record)
-    
-    logger.info(f"Updated truth record: {record.taid}")
-    return record
 
 # ============================================================================
 # QUERY PROCESSING ENDPOINT
 # ============================================================================
 
-@api_router.post("/query", response_model=QueryResponse)
-async def process_query(query_req: QueryRequest, db: Session = Depends(get_db)):
+@api_router.post("/query")
+async def process_query(query_req: QueryRequest):
     """
     Process crew query (SMS or web interface)
     
@@ -289,7 +296,7 @@ async def process_query(query_req: QueryRequest, db: Session = Depends(get_db)):
     
     try:
         # Find tour
-        tour = db.query(Tour).filter(Tour.tour_code == query_req.tour_code).first()
+        tour = await db.tours.find_one({"tour_code": query_req.tour_code})
         if not tour:
             raise HTTPException(status_code=404, detail=f"Tour not found: {query_req.tour_code}")
         
@@ -302,123 +309,105 @@ async def process_query(query_req: QueryRequest, db: Session = Depends(get_db)):
         keywords = intent_data.get("keywords", [])
         
         # Step 2: Retrieve truth records
-        truth_records = db.query(TruthRecord).filter(
-            TruthRecord.tour_id == tour.id,
-            TruthRecord.record_status.in_([RecordStatus.VERIFIED, RecordStatus.DRAFT])
-        ).all()
+        truth_records = await db.truth_records.find({
+            "tour_id": tour["id"],
+            "record_status": {"$in": ["verified", "draft"]}
+        }).to_list(100)
         
-        # Simple keyword matching (in production: use vector search or full-text search)
+        # Simple keyword matching
         matched_records = []
         for record in truth_records:
-            record_keywords = record.search_keywords or []
-            if any(kw in record_keywords for kw in keywords):
+            record_keywords = record.get("search_keywords", [])
+            record_text = str(record.get("data", "")).lower()
+            
+            # Match keywords in data or search_keywords
+            if any(kw.lower() in record_text for kw in keywords):
                 matched_records.append(record)
         
         # Step 3: Determine answer policy
         if matched_records:
-            best_record = max(matched_records, key=lambda r: r.confidence)
+            best_record = max(matched_records, key=lambda r: r.get("confidence", 0))
             
-            # Check confidence threshold
-            if best_record.confidence >= best_record.threshold_applied:
-                answer_policy = AnswerPolicy.TRUTH_RECORD
-                
-                # Financial guardrail check
-                if best_record.record_type == "finance" and best_record.financial_guardrail:
-                    guardrail = best_record.financial_guardrail
-                    if not guardrail.get("confirmation_status") == "confirmed":
-                        answer_policy = AnswerPolicy.ESCALATE
-                        
-                        # Create escalation
-                        escalation = Escalation(
-                            id=generate_uuid(),
-                            taid=generate_taid("TAID-TT-TKT"),
-                            tour_id=tour.id,
-                            escalation_type="financial_guardrail",
-                            severity="high",
-                            description=f"Financial query requires confirmation: {query_req.query}",
-                            query_context={"query": query_req.query, "record_taid": best_record.taid}
-                        )
-                        db.add(escalation)
-                        db.commit()
-                
-                # Format response
-                response_text = await openai_processor.format_response(best_record.data, query_req.query)
-                confidence = best_record.confidence
-                truth_taids = [best_record.taid]
+            confidence = best_record.get("confidence", 1.0)
+            threshold = best_record.get("threshold_applied", 0.8)
+            
+            if confidence >= threshold:
+                answer_policy = "truth_record"
+                response_text = await openai_processor.format_response(best_record["data"], query_req.query)
+                truth_taids = [best_record["taid"]]
             else:
                 # Low confidence → escalate
-                answer_policy = AnswerPolicy.ESCALATE
+                answer_policy = "escalate"
                 response_text = "I found information but I'm not confident. Escalating to team."
-                confidence = best_record.confidence
-                truth_taids = [best_record.taid]
+                truth_taids = [best_record["taid"]]
                 
                 # Create escalation
-                escalation = Escalation(
-                    id=generate_uuid(),
-                    taid=generate_taid("TAID-TT-TKT"),
-                    tour_id=tour.id,
-                    escalation_type="low_confidence",
-                    severity="medium",
-                    description=f"Low confidence query: {query_req.query}",
-                    query_context={"query": query_req.query, "confidence": best_record.confidence}
-                )
-                db.add(escalation)
-                db.commit()
+                await db.escalations.insert_one({
+                    "id": generate_uuid(),
+                    "taid": generate_taid("TAID-TT-TKT"),
+                    "tour_id": tour["id"],
+                    "escalation_type": "low_confidence",
+                    "severity": "medium",
+                    "status": "open",
+                    "description": f"Low confidence query: {query_req.query}",
+                    "query_context": {"query": query_req.query, "confidence": confidence},
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                })
         else:
             # No match → refusal
-            answer_policy = AnswerPolicy.REFUSAL
+            answer_policy = "refusal"
             response_text = "I don't have information about that. Please contact your Tour Manager."
             confidence = 0.0
             truth_taids = []
             
             # Create escalation
-            escalation = Escalation(
-                id=generate_uuid(),
-                taid=generate_taid("TAID-TT-TKT"),
-                tour_id=tour.id,
-                escalation_type="missing_info",
-                severity="low",
-                description=f"No information found: {query_req.query}",
-                query_context={"query": query_req.query}
-            )
-            db.add(escalation)
-            db.commit()
+            await db.escalations.insert_one({
+                "id": generate_uuid(),
+                "taid": generate_taid("TAID-TT-TKT"),
+                "tour_id": tour["id"],
+                "escalation_type": "missing_info",
+                "severity": "low",
+                "status": "open",
+                "description": f"No information found: {query_req.query}",
+                "query_context": {"query": query_req.query},
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
         
         # Step 4: Log invocation (append-only)
         latency_ms = int((time.time() - start_time) * 1000)
         
-        invocation = Invocation(
-            id=generate_uuid(),
-            taid=generate_taid("TAID-TT-INV"),
-            session_id=session_id,
-            tour_id=tour.id,
-            tour_code_at_time=tour.tour_code,
-            phone_hash=phone_hash,
-            query_text=query_req.query,
-            query_intent=intent_data.get("intent"),
-            answer_policy=answer_policy,
-            confidence=confidence,
-            response_text=response_text,
-            response_preview=response_text[:280] if response_text else None,
-            truth_record_taids=truth_taids,
-            status="completed",
-            latency_ms=latency_ms
-        )
+        invocation_doc = {
+            "id": generate_uuid(),
+            "taid": generate_taid("TAID-TT-INV"),
+            "session_id": session_id,
+            "tour_id": tour["id"],
+            "tour_code_at_time": tour["tour_code"],
+            "phone_hash": phone_hash,
+            "query_text": query_req.query,
+            "query_intent": intent_data.get("intent"),
+            "answer_policy": answer_policy,
+            "confidence": confidence,
+            "threshold_applied": 0.8,
+            "response_text": response_text,
+            "response_preview": response_text[:280] if response_text else None,
+            "truth_record_taids": truth_taids,
+            "status": "completed",
+            "latency_ms": latency_ms,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
         
-        db.add(invocation)
-        db.commit()
-        db.refresh(invocation)
+        await db.invocations.insert_one(invocation_doc)
         
-        logger.info(f"Processed query: {invocation.taid} (policy: {answer_policy}, latency: {latency_ms}ms)")
+        logger.info(f"Processed query: {invocation_doc['taid']} (policy: {answer_policy}, latency: {latency_ms}ms)")
         
-        return QueryResponse(
-            response=response_text,
-            confidence=confidence,
-            answer_policy=answer_policy.value,
-            truth_record_taids=truth_taids,
-            session_id=session_id,
-            invocation_taid=invocation.taid
-        )
+        return {
+            "response": response_text,
+            "confidence": confidence,
+            "answer_policy": answer_policy,
+            "truth_record_taids": truth_taids,
+            "session_id": session_id,
+            "invocation_taid": invocation_doc["taid"]
+        }
     
     except Exception as e:
         logger.error(f"Query processing failed: {str(e)}")
@@ -428,103 +417,62 @@ async def process_query(query_req: QueryRequest, db: Session = Depends(get_db)):
 # INVOCATION LOG ENDPOINTS
 # ============================================================================
 
-@api_router.get("/tours/{tour_id}/invocations", response_model=List[InvocationResponse])
-async def list_invocations(
-    tour_id: str,
-    limit: int = 100,
-    db: Session = Depends(get_db)
-):
+@api_router.get("/tours/{tour_id}/invocations")
+async def list_invocations(tour_id: str, limit: int = 100):
     """List recent invocations for a tour"""
-    invocations = db.query(Invocation).filter(
-        Invocation.tour_id == tour_id
-    ).order_by(Invocation.created_at.desc()).limit(limit).all()
+    invocations = await db.invocations.find(
+        {"tour_id": tour_id},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(limit).to_list(limit)
     return invocations
 
 # ============================================================================
 # ESCALATION ENDPOINTS
 # ============================================================================
 
-@api_router.get("/tours/{tour_id}/escalations", response_model=List[EscalationResponse])
-async def list_escalations(
-    tour_id: str,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
+@api_router.get("/tours/{tour_id}/escalations")
+async def list_escalations(tour_id: str, status: Optional[str] = None):
     """List escalations for a tour"""
-    query = db.query(Escalation).filter(Escalation.tour_id == tour_id)
-    
+    query = {"tour_id": tour_id}
     if status:
-        query = query.filter(Escalation.status == status)
+        query["status"] = status
     
-    escalations = query.order_by(Escalation.created_at.desc()).all()
+    escalations = await db.escalations.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
     return escalations
-
-@api_router.patch("/escalations/{escalation_id}", response_model=EscalationResponse)
-async def update_escalation(
-    escalation_id: str,
-    update: EscalationUpdate,
-    db: Session = Depends(get_db)
-):
-    """Update escalation status"""
-    escalation = db.query(Escalation).filter(Escalation.id == escalation_id).first()
-    if not escalation:
-        raise HTTPException(status_code=404, detail="Escalation not found")
-    
-    if update.status:
-        escalation.status = update.status
-        if update.status == "resolved":
-            escalation.resolved_at = datetime.now(timezone.utc)
-    
-    if update.resolution_notes:
-        escalation.resolution_notes = update.resolution_notes
-    
-    if update.resolved_by:
-        escalation.resolved_by = update.resolved_by
-    
-    db.commit()
-    db.refresh(escalation)
-    
-    logger.info(f"Updated escalation: {escalation.taid}")
-    return escalation
 
 # ============================================================================
 # SMS WEBHOOK ENDPOINT (Twilio)
 # ============================================================================
 
 @api_router.post("/sms/webhook")
-async def sms_webhook(webhook: SMSWebhook, db: Session = Depends(get_db)):
-    """
-    Twilio SMS webhook handler
-    
-    When crew texts TourText number, this endpoint:
-    1. Receives the message
-    2. Processes the query
-    3. Sends response via Twilio
-    """
+async def sms_webhook(From: str = Form(...), Body: str = Form(...), MessageSid: str = Form(...)):
+    """Twilio SMS webhook handler"""
     try:
-        phone = webhook.From
-        message = webhook.Body
+        logger.info(f"SMS received from {From[:4]}***: {Body}")
         
-        logger.info(f"SMS received from {phone[:4]}***: {message}")
+        # For now, use a default tour (in production: implement tour detection)
+        # Could be based on phone number mapping or message prefix
+        tours = await db.tours.find({"status": "active"}, {"_id": 0}).limit(1).to_list(1)
         
-        # Extract tour code from message or use default
-        # Format: "TOURCODE: query" or just "query" (uses default tour)
-        tour_code = "DEFAULT"  # In production: implement tour detection logic
+        if not tours:
+            await twilio_client.send_sms(From, "No active tours found. Please contact admin.")
+            return {"status": "error", "message": "No active tours"}
+        
+        tour_code = tours[0]["tour_code"]
         
         # Process query
         query_response = await process_query(
             QueryRequest(
                 tour_code=tour_code,
-                query=message,
-                phone_number=phone
-            ),
-            db
+                query=Body,
+                phone_number=From
+            )
         )
         
         # Send SMS response
-        await twilio_client.send_sms(phone, query_response.response)
+        await twilio_client.send_sms(From, query_response["response"])
         
-        return {"status": "success", "invocation_taid": query_response.invocation_taid}
+        return {"status": "success", "invocation_taid": query_response["invocation_taid"]}
     
     except Exception as e:
         logger.error(f"SMS webhook failed: {str(e)}")
@@ -534,37 +482,33 @@ async def sms_webhook(webhook: SMSWebhook, db: Session = Depends(get_db)):
 # BACKGROUND PROCESSING
 # ============================================================================
 
-async def process_uploaded_file(file_id: str, file_content: bytes, db: Session):
-    """
-    Background task: Process uploaded file and create truth records
-    
-    This would:
-    1. Parse CSV/Excel/PDF
-    2. Extract structured data
-    3. Create truth records
-    4. Link to source file
-    """
+async def process_uploaded_file(file_id: str, file_content: bytes):
+    """Background task: Process uploaded file and create truth records"""
     try:
-        file = db.query(SourceFile).filter(SourceFile.id == file_id).first()
+        file = await db.source_files.find_one({"id": file_id})
         if not file:
             return
         
-        logger.info(f"Processing file: {file.taid}")
+        logger.info(f"Processing file: {file['taid']}")
         
         # Placeholder: In production, implement actual parsing logic
         # - Use pandas for CSV/Excel
         # - Use pdfplumber for PDFs
         # - Create TruthRecord objects
         
-        file.processed = True
-        db.commit()
+        await db.source_files.update_one(
+            {"id": file_id},
+            {"$set": {"processed": True}}
+        )
         
-        logger.info(f"File processed: {file.taid}")
+        logger.info(f"File processed: {file['taid']}")
     
     except Exception as e:
         logger.error(f"File processing failed: {str(e)}")
-        file.processing_error = str(e)
-        db.commit()
+        await db.source_files.update_one(
+            {"id": file_id},
+            {"$set": {"processing_error": str(e)}}
+        )
 
 # ============================================================================
 # INCLUDE ROUTER & MIDDLEWARE
@@ -586,4 +530,5 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown():
+    client.close()
     logger.info("TourText API shutting down")

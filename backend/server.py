@@ -1,26 +1,16 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import time
 from datetime import datetime, timezone
 
-# Import database and models
-from database import get_db, engine, Base
-from models import Tour, SourceFile, TruthRecord, Invocation, Escalation, RecordStatus, AnswerPolicy
-from schemas import (
-    TourCreate, TourResponse,
-    SourceFileResponse,
-    TruthRecordCreate, TruthRecordResponse, TruthRecordUpdate,
-    InvocationCreate, InvocationResponse,
-    EscalationCreate, EscalationResponse, EscalationUpdate,
-    SMSWebhook, QueryRequest, QueryResponse
-)
+# Import utilities
 from utils import (
     generate_taid, generate_uuid, generate_session_id,
     hash_phone_number, hash_file, generate_tour_code
@@ -30,8 +20,10 @@ from integrations import twilio_client, openai_processor, supabase_storage
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+# MongoDB connection (temporary until Postgres/Supabase configured)
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ.get('DB_NAME', 'tourtext')]
 
 # Create the main app
 app = FastAPI(title="TourText API", version="4.1")

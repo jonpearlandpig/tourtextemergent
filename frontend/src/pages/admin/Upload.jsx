@@ -301,6 +301,17 @@ const Upload = ({ tour, onComplete }) => {
             Approve & Activate
           </Button>
           
+          {uploadedFiles.length > 0 && (
+            <Button
+              onClick={handleReprocessAll}
+              size="lg"
+              variant="outline"
+              data-testid="reprocess-all-button"
+            >
+              Reprocess All Files
+            </Button>
+          )}
+          
           <Button
             variant="outline"
             size="lg"

@@ -219,6 +219,41 @@ async def list_tour_files(tour_id: str):
     files = await db.source_files.find({"tour_id": tour_id}, {"_id": 0}).sort("upload_date", -1).to_list(100)
     return files
 
+@api_router.post("/files/{file_id}/reprocess")
+async def reprocess_file(file_id: str, background_tasks: BackgroundTasks):
+    """Re-process a file to create truth records"""
+    try:
+        file = await db.source_files.find_one({"id": file_id})
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Get file content from storage
+        # For now, if file is local, read it
+        file_path = file.get('file_path', '')
+        
+        if file_path.startswith('/tmp/'):
+            # Local file
+            with open(file_path, 'rb') as f:
+                file_content = f.read()
+        else:
+            # Would need to download from Supabase
+            raise HTTPException(status_code=400, detail="Cannot re-process remote files yet")
+        
+        # Reset processed status
+        await db.source_files.update_one(
+            {"id": file_id},
+            {"$set": {"processed": False, "processing_error": None}}
+        )
+        
+        # Re-process in background
+        background_tasks.add_task(process_uploaded_file, file_id, file_content)
+        
+        return {"status": "reprocessing", "file_id": file_id}
+    
+    except Exception as e:
+        logger.error(f"Reprocess failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # TRUTH RECORD ENDPOINTS
 # ============================================================================

@@ -161,17 +161,39 @@ class OpenAIProcessor:
             if 'shows' in truth_data:
                 shows = truth_data['shows']
                 
-                # Try to find matching city or state
+                # State name to abbreviation mapping
+                state_mapping = {
+                    'florida': 'FL', 'california': 'CA', 'texas': 'TX', 'new york': 'NY',
+                    'pennsylvania': 'PA', 'illinois': 'IL', 'ohio': 'OH', 'georgia': 'GA',
+                    'north carolina': 'NC', 'michigan': 'MI', 'indiana': 'IN', 'tennessee': 'TN',
+                    'massachusetts': 'MA', 'arizona': 'AZ', 'minnesota': 'MN', 'colorado': 'CO',
+                    'washington': 'WA', 'maryland': 'MD', 'wisconsin': 'WI', 'missouri': 'MO'
+                }
+                
+                # Try to find matching city, state, or venue
                 matching_shows = []
                 for show in shows:
                     city = show['city'].lower()
-                    state = show['state'].lower()
+                    state = show['state'].upper()
                     venue = show['venue'].lower()
                     
-                    # Check if query matches city, state, or venue
-                    if (city in query_lower or query_lower in city or
-                        state in query_lower or query_lower in state or
-                        venue in query_lower or query_lower in venue):
+                    # Check if query matches city
+                    if city in query_lower or query_lower in city:
+                        matching_shows.append(show)
+                        continue
+                    
+                    # Check if query matches state abbreviation
+                    if state.lower() in query_lower or query_lower == state.lower():
+                        matching_shows.append(show)
+                        continue
+                    
+                    # Check if query matches full state name
+                    if query_lower in state_mapping and state_mapping[query_lower] == state:
+                        matching_shows.append(show)
+                        continue
+                    
+                    # Check if query matches venue
+                    if venue in query_lower or query_lower in venue:
                         matching_shows.append(show)
                 
                 # If we found exact matches, return them

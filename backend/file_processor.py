@@ -182,20 +182,23 @@ class FileProcessor:
         """Extract structured records from text"""
         records = []
         
-        # Look for show schedule patterns like "STOP010 Mar 20 University Park, PA Bryce Jordan Center"
-        show_pattern = r'STOP\d+\s+([A-Z][a-z]{2}\s+\d{1,2})\s+([^,]+),\s*([A-Z]{2})\s+(.+?)(?=STOP|\n|$)'
+        # Look for show schedule patterns like "STOP001 Mar 5 Fort Wayne, IN Allen County War Memorial Coliseum"
+        show_pattern = r'STOP\d+\s+([A-Z][a-z]{2}\s+\d{1,2})\s+([^,]+),\s*([A-Z]{2}\.?)\s+(.+?)(?=\nSTOP|\n\n|$)'
         shows = re.findall(show_pattern, text, re.MULTILINE)
         
         if shows:
             # Found show schedule data
             show_records = []
             for date_str, city, state, venue in shows:
-                show_records.append({
-                    'date': date_str.strip(),
-                    'city': city.strip(),
-                    'state': state.strip(),
-                    'venue': venue.strip()
-                })
+                # Clean up venue (stop at next line or URL)
+                venue_clean = venue.split('\n')[0].split('http')[0].strip()
+                if venue_clean and len(venue_clean) > 3:  # Valid venue name
+                    show_records.append({
+                        'date': date_str.strip(),
+                        'city': city.strip(),
+                        'state': state.strip().rstrip('.'),
+                        'venue': venue_clean
+                    })
             
             if show_records:
                 # Create searchable keywords
@@ -204,6 +207,10 @@ class FileProcessor:
                     keywords.append(show['city'].lower())
                     keywords.append(show['venue'].lower())
                     keywords.append(f"{show['city']} {show['state']}".lower())
+                    keywords.append(show['state'].lower())
+                    # Add abbreviated city names
+                    city_parts = show['city'].lower().split()
+                    keywords.extend(city_parts)
                 
                 records.append({
                     'record_type': 'show_schedule',

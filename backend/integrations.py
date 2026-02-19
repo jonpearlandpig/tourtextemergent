@@ -161,19 +161,39 @@ class OpenAIProcessor:
             if 'shows' in truth_data:
                 shows = truth_data['shows']
                 
-                # Try to find matching city
+                # Try to find matching city or state
+                matching_shows = []
                 for show in shows:
                     city = show['city'].lower()
-                    if city in query_lower or query_lower in city:
-                        return f"**{show['city']}, {show['state']}**\nVenue: {show['venue']}\nDate: {show['date']}\n\nFor complete tour details, check the uploaded documents."
+                    state = show['state'].lower()
+                    venue = show['venue'].lower()
+                    
+                    # Check if query matches city, state, or venue
+                    if (city in query_lower or query_lower in city or
+                        state in query_lower or query_lower in state or
+                        venue in query_lower or query_lower in venue):
+                        matching_shows.append(show)
                 
-                # No exact match, show all if query is general
+                # If we found exact matches, return them
+                if len(matching_shows) == 1:
+                    show = matching_shows[0]
+                    return f"**{show['city']}, {show['state']}**\nVenue: {show['venue']}\nDate: {show['date']}\n\nFor complete tour details, check the uploaded documents."
+                elif len(matching_shows) > 1 and len(matching_shows) <= 5:
+                    response_parts = []
+                    for show in matching_shows:
+                        response_parts.append(f"• {show['date']} - {show['city']}, {show['state']} - {show['venue']}")
+                    return "\n".join(response_parts) + "\n\nFor complete details, check the uploaded tour documents."
+                elif len(matching_shows) > 5:
+                    return f"Found {len(matching_shows)} shows matching your query. Please be more specific about which city or date."
+                
+                # No matches but we have shows - return all if reasonable
                 if len(shows) <= 5:
+                    response_parts = []
                     for show in shows:
                         response_parts.append(f"• {show['date']} - {show['city']}, {show['state']} - {show['venue']}")
                     return "\n".join(response_parts) + "\n\nFor complete details, check the uploaded tour documents."
                 else:
-                    return f"Found {len(shows)} shows. Please be more specific about which city or date you're asking about."
+                    return f"Found {len(shows)} shows in total. Please be more specific about which city, state, or date you're asking about."
             
             # Original format handling
             cities = truth_data.get('cities', [])

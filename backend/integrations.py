@@ -152,14 +152,30 @@ class OpenAIProcessor:
     
     def _basic_format(self, truth_data: Dict[str, Any], query: str) -> str:
         """Basic formatting without LLM"""
-        # Extract relevant information
         response_parts = []
         
         if isinstance(truth_data, dict):
-            # If query mentions a city, try to find show information for that city
-            query_lower = query.lower()
+            query_lower = query.lower().strip('?!.,')
             
-            # Check if this is a city query
+            # Check if this is a show_schedule record (new format)
+            if 'shows' in truth_data:
+                shows = truth_data['shows']
+                
+                # Try to find matching city
+                for show in shows:
+                    city = show['city'].lower()
+                    if city in query_lower or query_lower in city:
+                        return f"**{show['city']}, {show['state']}**\nVenue: {show['venue']}\nDate: {show['date']}\n\nFor complete tour details, check the uploaded documents."
+                
+                # No exact match, show all if query is general
+                if len(shows) <= 5:
+                    for show in shows:
+                        response_parts.append(f"• {show['date']} - {show['city']}, {show['state']} - {show['venue']}")
+                    return "\n".join(response_parts) + "\n\nFor complete details, check the uploaded tour documents."
+                else:
+                    return f"Found {len(shows)} shows. Please be more specific about which city or date you're asking about."
+            
+            # Original format handling
             cities = truth_data.get('cities', [])
             venues = truth_data.get('venues', [])
             dates = truth_data.get('dates', [])
@@ -174,10 +190,9 @@ class OpenAIProcessor:
             if matching_city:
                 response_parts.append(f"**{matching_city}**")
                 
-                # Try to find venue for this city
+                # Look for real venue names
                 if venues:
-                    # Look for venue names (longer strings, contains spaces or "Center", "Arena", etc.)
-                    real_venues = [v for v in venues if len(v) > 10 and (' ' in v or 'center' in v.lower() or 'arena' in v.lower() or 'stadium' in v.lower())]
+                    real_venues = [v for v in venues if len(v) > 10 and (' ' in v or 'center' in v.lower() or 'arena' in v.lower() or 'stadium' in v.lower() or 'hall' in v.lower())]
                     if real_venues:
                         response_parts.append(f"Venue: {real_venues[0]}")
                 
@@ -188,7 +203,7 @@ class OpenAIProcessor:
             if len(response_parts) > 1:
                 return "\n".join(response_parts) + "\n\nFor complete details, check the uploaded tour documents."
             
-            # Otherwise, show general information
+            # General information
             if dates and len(dates) > 0:
                 response_parts.append(f"Dates: {', '.join(dates[:3])}")
             
@@ -196,8 +211,7 @@ class OpenAIProcessor:
                 response_parts.append(f"Cities: {', '.join(cities[:5])}")
             
             if venues:
-                # Filter for real venue names
-                real_venues = [v for v in venues if len(v) > 10 and (' ' in v or 'center' in v.lower() or 'arena' in v.lower() or 'stadium' in v.lower())]
+                real_venues = [v for v in venues if len(v) > 10 and (' ' in v or 'center' in v.lower() or 'arena' in v.lower() or 'stadium' in v.lower() or 'hall' in v.lower())]
                 if real_venues:
                     response_parts.append(f"Venues: {', '.join(real_venues[:3])}")
             
@@ -211,7 +225,6 @@ class OpenAIProcessor:
             
             if 'full_content' in truth_data:
                 content = truth_data['full_content']
-                # Search for query in content
                 query_terms = [q.strip('?!.,') for q in query_lower.split()]
                 lines = content.split('\n')
                 relevant_lines = []
@@ -219,7 +232,6 @@ class OpenAIProcessor:
                 for i, line in enumerate(lines):
                     line_lower = line.lower()
                     if any(term in line_lower for term in query_terms if len(term) > 2):
-                        # Get context around the match
                         start = max(0, i - 2)
                         end = min(len(lines), i + 3)
                         relevant_lines.extend(lines[start:end])
@@ -229,7 +241,6 @@ class OpenAIProcessor:
                 if relevant_lines:
                     return "\n".join(relevant_lines[:10])
             
-            # Fallback
             return "I found relevant information in the tour documents. Please check the uploaded files for specific details."
         
         return str(truth_data)[:500]

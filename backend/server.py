@@ -490,19 +490,64 @@ async def process_uploaded_file(file_id: str, file_content: bytes):
         if not file:
             return
         
-        logger.info(f"Processing file: {file['taid']}")
+        logger.info(f"Processing file: {file['taid']} - {file['file_name']}")
         
-        # Placeholder: In production, implement actual parsing logic
-        # - Use pandas for CSV/Excel
-        # - Use pdfplumber for PDFs
-        # - Create TruthRecord objects
-        
-        await db.source_files.update_one(
-            {"id": file_id},
-            {"$set": {"processed": True}}
+        # Process file and extract data
+        result = await file_processor.process_file(
+            file_content,
+            file['file_name'],
+            file['file_type'],
+            file.get('mime_type', '')
         )
         
-        logger.info(f"File processed: {file['taid']}")
+        if result['success'] and result['truth_records']:
+            logger.info(f"Extracted {len(result['truth_records'])} truth records from {file['file_name']}")
+            
+            # Create truth records in database
+            for truth_data in result['truth_records']:
+                record_id = generate_uuid()
+                taid = generate_taid("TAID-TT-TRUTH")
+                
+                truth_doc = {
+                    "id": record_id,
+                    "taid": taid,
+                    "tour_id": file['tour_id'],
+                    "record_type": truth_data['record_type'],
+                    "schema_version": "1.0",
+                    "record_status": "verified",  # Auto-verify file-based records
+                    "data": truth_data['data'],
+                    "confidence": truth_data.get('confidence', 1.0),
+                    "threshold_applied": 0.8,
+                    "source_file_ids": [file_id],
+                    "search_keywords": truth_data.get('search_keywords', []),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": None
+                }
+                
+                await db.truth_records.insert_one(truth_doc)
+                logger.info(f"Created truth record: {taid}")
+            
+            # Update file with success
+            await db.source_files.update_one(
+                {"id": file_id},
+                {"$set": {
+                    "processed": True,
+                    "extracted_metadata": result['metadata']
+                }}
+            )
+            
+            logger.info(f"File processed successfully: {file['taid']}")
+        else:
+            # Update with error
+            error_msg = result.get('error', 'No records extracted')
+            logger.error(f"File processing failed: {error_msg}")
+            await db.source_files.update_one(
+                {"id": file_id},
+                {"$set": {
+                    "processed": True,
+                    "processing_error": error_msg
+                }}
+            )
     
     except Exception as e:
         logger.error(f"File processing failed: {str(e)}")

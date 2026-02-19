@@ -81,28 +81,72 @@ class FileProcessor:
             all_text = []
             
             with pdfplumber.open(pdf_file) as pdf:
-                for page_num, page in enumerate(pdf.pages):
+                # First, collect all text
+                for page in pdf.pages:
                     text = page.extract_text()
                     if text:
                         all_text.append(text)
+                
+                # Now try to extract show schedule from combined text
+                full_text = "\n".join(all_text)
+                
+                # Look for show schedule pattern
+                show_pattern = r'STOP\d+\s+([A-Z][a-z]{2}\s+\d{1,2})\s+([^,\n]+),\s*([A-Z]{2}\.?)\s+([^\n]+)'
+                shows = re.findall(show_pattern, full_text, re.MULTILINE)
+                
+                if shows:
+                    # Process shows
+                    show_records = []
+                    for date_str, city, state, venue in shows:
+                        venue_clean = venue.split('http')[0].strip()
+                        if venue_clean and len(venue_clean) > 3:
+                            show_records.append({
+                                'date': date_str.strip(),
+                                'city': city.strip(),
+                                'state': state.strip().rstrip('.'),
+                                'venue': venue_clean
+                            })
+                    
+                    if show_records:
+                        # Create keywords
+                        keywords = []
+                        for show in show_records:
+                            keywords.append(show['city'].lower())
+                            keywords.append(show['venue'].lower())
+                            keywords.append(f"{show['city']} {show['state']}".lower())
+                            keywords.append(show['state'].lower())
+                            # Add city parts
+                            city_parts = show['city'].lower().split()
+                            keywords.extend(city_parts)
                         
-                        # Extract structured information from text
-                        # Look for common patterns
-                        records = self.extract_records_from_text(text, page_num + 1)
+                        truth_records.append({
+                            'record_type': 'show_schedule',
+                            'data': {
+                                'shows': show_records,
+                                'context': full_text[:500]
+                            },
+                            'search_keywords': list(set(keywords)),
+                            'confidence': 1.0
+                        })
+                        
+                        logger.info(f"Extracted {len(show_records)} shows from schedule")
+                
+                # If no show schedule, extract page by page
+                if not truth_records:
+                    for page_num, page_text in enumerate(all_text):
+                        records = self.extract_records_from_text(page_text, page_num + 1)
                         truth_records.extend(records)
             
-            # If no structured records found, create one general record with all text
+            # If still no structured records, create one general record
             if not truth_records and all_text:
                 full_text = "\n\n".join(all_text)
-                
-                # Extract keywords for searching
                 keywords = self.extract_keywords(full_text)
                 
                 truth_records.append({
                     'record_type': 'general',
                     'data': {
                         'source': file_name,
-                        'content': full_text[:5000],  # Limit content size
+                        'content': full_text[:5000],
                         'full_content': full_text,
                         'page_count': len(all_text)
                     },

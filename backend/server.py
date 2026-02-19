@@ -17,6 +17,7 @@ from utils import (
     hash_phone_number, hash_file, generate_tour_code
 )
 from integrations import twilio_client, openai_processor, supabase_storage
+from file_processor import file_processor
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')

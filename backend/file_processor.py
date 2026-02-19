@@ -127,6 +127,20 @@ class FileProcessor:
                 if shows:
                     logger.info(f"Extracted {len(shows)} shows from schedule")
                     
+                    # State abbreviation to full name mapping
+                    state_names = {
+                        'AL': 'alabama', 'AK': 'alaska', 'AZ': 'arizona', 'AR': 'arkansas', 'CA': 'california',
+                        'CO': 'colorado', 'CT': 'connecticut', 'DE': 'delaware', 'FL': 'florida', 'GA': 'georgia',
+                        'HI': 'hawaii', 'ID': 'idaho', 'IL': 'illinois', 'IN': 'indiana', 'IA': 'iowa',
+                        'KS': 'kansas', 'KY': 'kentucky', 'LA': 'louisiana', 'ME': 'maine', 'MD': 'maryland',
+                        'MA': 'massachusetts', 'MI': 'michigan', 'MN': 'minnesota', 'MS': 'mississippi', 'MO': 'missouri',
+                        'MT': 'montana', 'NE': 'nebraska', 'NV': 'nevada', 'NH': 'new hampshire', 'NJ': 'new jersey',
+                        'NM': 'new mexico', 'NY': 'new york', 'NC': 'north carolina', 'ND': 'north dakota', 'OH': 'ohio',
+                        'OK': 'oklahoma', 'OR': 'oregon', 'PA': 'pennsylvania', 'RI': 'rhode island', 'SC': 'south carolina',
+                        'SD': 'south dakota', 'TN': 'tennessee', 'TX': 'texas', 'UT': 'utah', 'VT': 'vermont',
+                        'VA': 'virginia', 'WA': 'washington', 'WV': 'west virginia', 'WI': 'wisconsin', 'WY': 'wyoming'
+                    }
+                    
                     # Create keywords for searching
                     keywords = set()
                     for show in shows:
@@ -134,6 +148,9 @@ class FileProcessor:
                         keywords.add(show['venue'].lower())
                         keywords.add(show['state'].lower())
                         keywords.add(f"{show['city'].lower()} {show['state'].lower()}")
+                        # Add full state name
+                        if show['state'] in state_names:
+                            keywords.add(state_names[show['state']])
                         # Add city parts for partial matching
                         for part in show['city'].lower().split():
                             if len(part) > 2:

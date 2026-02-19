@@ -138,8 +138,9 @@ class OpenAIProcessor:
             Natural language response string
         """
         if not self.enabled:
-            logger.warning("OpenAI disabled - returning raw data")
-            return str(truth_data)
+            logger.warning("OpenAI disabled - using basic formatting")
+            # Basic formatting without LLM
+            return self._basic_format(truth_data, query)
         
         try:
             # Use GPT to format response (implementation placeholder)
@@ -147,7 +148,58 @@ class OpenAIProcessor:
             return f"Response based on truth records: {truth_data}"
         except Exception as e:
             logger.error(f"Failed to format response: {str(e)}")
-            return "Error formatting response. Please contact admin."
+            return self._basic_format(truth_data, query)
+    
+    def _basic_format(self, truth_data: Dict[str, Any], query: str) -> str:
+        """Basic formatting without LLM"""
+        # Extract relevant information
+        if isinstance(truth_data, dict):
+            # Check for common fields
+            if 'cities' in truth_data and truth_data.get('cities'):
+                cities = ", ".join(truth_data['cities'])
+                response = f"Found information about: {cities}. "
+            
+            if 'venues' in truth_data and truth_data.get('venues'):
+                venues = [v for v in truth_data['venues'][:3] if len(v) > 10]
+                if venues:
+                    response = f"Venues: {', '.join(venues)}. "
+            
+            if 'dates' in truth_data and truth_data.get('dates'):
+                dates = ", ".join(truth_data['dates'][:3])
+                response = f"Dates: {dates}. "
+            
+            if 'times' in truth_data and truth_data.get('times'):
+                times = ", ".join(truth_data['times'][:3])
+                response = f"Times: {times}. "
+            
+            if 'context' in truth_data and truth_data.get('context'):
+                # Return first 300 chars of context
+                context = truth_data['context'][:300]
+                return f"Here's what I found:\n\n{context}...\n\nFor more details, check the uploaded tour documents."
+            
+            if 'full_content' in truth_data:
+                content = truth_data['full_content']
+                # Search for query in content
+                query_lower = query.lower()
+                lines = content.split('\n')
+                relevant_lines = []
+                
+                for i, line in enumerate(lines):
+                    if query_lower in line.lower():
+                        # Get context around the match
+                        start = max(0, i - 2)
+                        end = min(len(lines), i + 3)
+                        relevant_lines.extend(lines[start:end])
+                        if len(relevant_lines) > 10:
+                            break
+                
+                if relevant_lines:
+                    return "\n".join(relevant_lines[:10])
+            
+            # Fallback
+            return "I found relevant information in the tour documents. Please check the uploaded files for details."
+        
+        return str(truth_data)[:500]
 
 # ============================================================================
 # SUPABASE STORAGE INTEGRATION

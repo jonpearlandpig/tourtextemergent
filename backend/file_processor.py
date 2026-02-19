@@ -182,9 +182,43 @@ class FileProcessor:
         """Extract structured records from text"""
         records = []
         
-        # Look for venue/show information patterns
-        # Examples: "Madison Square Garden", "Load-in: 10:00 AM", "March 15, 2026"
+        # Look for show schedule patterns like "STOP010 Mar 20 University Park, PA Bryce Jordan Center"
+        show_pattern = r'STOP\d+\s+([A-Z][a-z]{2}\s+\d{1,2})\s+([^,]+),\s*([A-Z]{2})\s+(.+?)(?=STOP|\n|$)'
+        shows = re.findall(show_pattern, text, re.MULTILINE)
         
+        if shows:
+            # Found show schedule data
+            show_records = []
+            for date_str, city, state, venue in shows:
+                show_records.append({
+                    'date': date_str.strip(),
+                    'city': city.strip(),
+                    'state': state.strip(),
+                    'venue': venue.strip()
+                })
+            
+            if show_records:
+                # Create searchable keywords
+                keywords = []
+                for show in show_records:
+                    keywords.append(show['city'].lower())
+                    keywords.append(show['venue'].lower())
+                    keywords.append(f"{show['city']} {show['state']}".lower())
+                
+                records.append({
+                    'record_type': 'show_schedule',
+                    'data': {
+                        'page': page_num,
+                        'shows': show_records,
+                        'context': text[:500]
+                    },
+                    'search_keywords': list(set(keywords)),
+                    'confidence': 1.0
+                })
+                
+                return records
+        
+        # Fallback to original pattern matching
         # Extract dates
         date_pattern = r'\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b'
         dates = re.findall(date_pattern, text, re.IGNORECASE)

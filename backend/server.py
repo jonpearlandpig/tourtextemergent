@@ -228,7 +228,6 @@ async def reprocess_file(file_id: str, background_tasks: BackgroundTasks):
             raise HTTPException(status_code=404, detail="File not found")
         
         # Get file content from storage
-        # For now, if file is local, read it
         file_path = file.get('file_path', '')
         
         if file_path.startswith('/tmp/'):
@@ -252,6 +251,42 @@ async def reprocess_file(file_id: str, background_tasks: BackgroundTasks):
     
     except Exception as e:
         logger.error(f"Reprocess failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/tours/{tour_id}/reprocess-all")
+async def reprocess_all_files(tour_id: str, background_tasks: BackgroundTasks):
+    """Re-process all files for a tour"""
+    try:
+        files = await db.source_files.find({"tour_id": tour_id}).to_list(100)
+        
+        if not files:
+            return {"status": "no files to process", "count": 0}
+        
+        count = 0
+        for file in files:
+            file_path = file.get('file_path', '')
+            
+            if file_path.startswith('/tmp/'):
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_content = f.read()
+                    
+                    # Reset status
+                    await db.source_files.update_one(
+                        {"id": file['id']},
+                        {"$set": {"processed": False, "processing_error": None}}
+                    )
+                    
+                    # Reprocess
+                    background_tasks.add_task(process_uploaded_file, file['id'], file_content)
+                    count += 1
+                except Exception as e:
+                    logger.error(f"Failed to queue {file['file_name']}: {str(e)}")
+        
+        return {"status": "reprocessing", "count": count}
+    
+    except Exception as e:
+        logger.error(f"Reprocess all failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================

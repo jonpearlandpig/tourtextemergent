@@ -385,15 +385,50 @@ async def process_query(query_req: QueryRequest):
             "record_status": {"$in": ["verified", "draft"]}
         }).to_list(100)
         
-        # Simple keyword matching
+        # Flexible keyword matching (partial matches, case-insensitive)
         matched_records = []
+        query_lower = query_req.query.lower().strip('?!.,')
+        
         for record in truth_records:
             record_keywords = record.get("search_keywords", [])
             record_text = str(record.get("data", "")).lower()
             
-            # Match keywords in data or search_keywords
-            if any(kw.lower() in record_text for kw in keywords):
+            # Score each record based on matches
+            score = 0
+            
+            # Check if query appears in record text
+            if query_lower in record_text:
+                score += 10
+            
+            # Check if query matches any keyword (partial match)
+            for kw in record_keywords:
+                kw_lower = str(kw).lower()
+                # Exact match
+                if query_lower == kw_lower:
+                    score += 5
+                # Partial match (query in keyword or keyword in query)
+                elif query_lower in kw_lower or kw_lower in query_lower:
+                    score += 3
+                # Word match (any word from query matches keyword)
+                else:
+                    for word in query_lower.split():
+                        if len(word) > 2 and word in kw_lower:
+                            score += 1
+            
+            # Check parsed keywords from intent
+            for kw in keywords:
+                kw_lower = kw.lower()
+                for record_kw in record_keywords:
+                    record_kw_lower = str(record_kw).lower()
+                    if kw_lower in record_kw_lower or record_kw_lower in kw_lower:
+                        score += 2
+            
+            if score > 0:
+                record['_match_score'] = score
                 matched_records.append(record)
+        
+        # Sort by match score
+        matched_records.sort(key=lambda r: r.get('_match_score', 0), reverse=True)
         
         # Step 3: Determine answer policy
         if matched_records:

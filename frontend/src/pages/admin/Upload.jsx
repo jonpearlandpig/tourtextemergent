@@ -116,6 +116,19 @@ const Upload = ({ tour, onComplete }) => {
     onComplete();
   };
 
+  const handleReprocessAll = async () => {
+    try {
+      const response = await axios.post(`${API}/tours/${tour.id}/reprocess-all`);
+      toast.success(`Reprocessing ${response.data.count} files. This may take a moment...`);
+      setTimeout(() => {
+        window.location.reload();
+      }, 3000);
+    } catch (error) {
+      console.error("Reprocess failed:", error);
+      toast.error("Failed to reprocess files");
+    }
+  };
+
   return (
     <div className="container mx-auto px-4 py-12" data-testid="upload-screen">
       <Toaster />

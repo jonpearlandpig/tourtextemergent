@@ -81,85 +81,108 @@ class FileProcessor:
             all_text = []
             
             with pdfplumber.open(pdf_file) as pdf:
-                # First, collect all text
+                # Collect all text
                 for page in pdf.pages:
                     text = page.extract_text()
                     if text:
                         all_text.append(text)
                 
-                # Now try to extract show schedule from combined text
                 full_text = "\n".join(all_text)
                 
-                # Look for show schedule pattern
-                show_pattern = r'STOP\d+\s+([A-Z][a-z]{2}\s+\d{1,2})\s+([^,\n]+),\s*([A-Z]{2}\.?)\s+([^\n]+)'
-                shows = re.findall(show_pattern, full_text, re.MULTILINE)
+                # Extract show schedule using simple line-by-line parsing
+                lines = full_text.split('\n')
+                shows = []
+                
+                for line in lines:
+                    # Match lines starting with STOP and containing month abbreviations
+                    if line.startswith('STOP') and any(month in line for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                        parts = line.split()
+                        if len(parts) >= 5:
+                            stop_num = parts[0]
+                            month = parts[1]
+                            day = parts[2]
+                            
+                            # Find city and state
+                            rest = ' '.join(parts[3:])
+                            if ',' in rest:
+                                city_part, venue_part = rest.split(',', 1)
+                                city = city_part.strip()
+                                
+                                # Extract state (2 letters) and venue
+                                state_match = re.match(r'\s*([A-Z]{2})\s+(.+)', venue_part)
+                                if state_match:
+                                    state = state_match.group(1)
+                                    venue = state_match.group(2).strip()
+                                    # Clean venue (remove URLs)
+                                    venue = venue.split('http')[0].strip()
+                                    
+                                    if venue and len(venue) > 3:
+                                        shows.append({
+                                            'date': f'{month} {day}',
+                                            'city': city,
+                                            'state': state,
+                                            'venue': venue
+                                        })
                 
                 if shows:
-                    # Process shows
-                    show_records = []
-                    for date_str, city, state, venue in shows:
-                        venue_clean = venue.split('http')[0].strip()
-                        if venue_clean and len(venue_clean) > 3:
-                            show_records.append({
-                                'date': date_str.strip(),
-                                'city': city.strip(),
-                                'state': state.strip().rstrip('.'),
-                                'venue': venue_clean
-                            })
+                    logger.info(f"Extracted {len(shows)} shows from schedule")
                     
-                    if show_records:
-                        # Create keywords
-                        keywords = []
-                        for show in show_records:
-                            keywords.append(show['city'].lower())
-                            keywords.append(show['venue'].lower())
-                            keywords.append(f"{show['city']} {show['state']}".lower())
-                            keywords.append(show['state'].lower())
-                            # Add city parts
-                            city_parts = show['city'].lower().split()
-                            keywords.extend(city_parts)
-                        
-                        truth_records.append({
-                            'record_type': 'show_schedule',
-                            'data': {
-                                'shows': show_records,
-                                'context': full_text[:500]
-                            },
-                            'search_keywords': list(set(keywords)),
-                            'confidence': 1.0
-                        })
-                        
-                        logger.info(f"Extracted {len(show_records)} shows from schedule")
+                    # Create keywords for searching
+                    keywords = set()
+                    for show in shows:
+                        keywords.add(show['city'].lower())
+                        keywords.add(show['venue'].lower())
+                        keywords.add(show['state'].lower())
+                        keywords.add(f"{show['city'].lower()} {show['state'].lower()}")
+                        # Add city parts for partial matching
+                        for part in show['city'].lower().split():
+                            if len(part) > 2:
+                                keywords.add(part)
+                        # Add venue parts
+                        for part in show['venue'].lower().split():
+                            if len(part) > 3:
+                                keywords.add(part)
+                    
+                    truth_records.append({
+                        'record_type': 'show_schedule',
+                        'data': {
+                            'shows': shows,
+                            'context': full_text[:500]
+                        },
+                        'search_keywords': list(keywords),
+                        'confidence': 1.0
+                    })
                 
-                # If no show schedule, extract page by page
+                # If no show schedule, try page-by-page extraction
                 if not truth_records:
                     for page_num, page_text in enumerate(all_text):
                         records = self.extract_records_from_text(page_text, page_num + 1)
                         truth_records.extend(records)
-            
-            # If still no structured records, create one general record
-            if not truth_records and all_text:
-                full_text = "\n\n".join(all_text)
-                keywords = self.extract_keywords(full_text)
                 
-                truth_records.append({
-                    'record_type': 'general',
-                    'data': {
-                        'source': file_name,
-                        'content': full_text[:5000],
-                        'full_content': full_text,
-                        'page_count': len(all_text)
-                    },
-                    'search_keywords': keywords,
-                    'confidence': 1.0
-                })
+                # If still no records, create general record
+                if not truth_records and all_text:
+                    full_text = "\n\n".join(all_text)
+                    keywords = self.extract_keywords(full_text)
+                    
+                    truth_records.append({
+                        'record_type': 'general',
+                        'data': {
+                            'source': file_name,
+                            'content': full_text[:5000],
+                            'full_content': full_text,
+                            'page_count': len(all_text)
+                        },
+                        'search_keywords': keywords,
+                        'confidence': 1.0
+                    })
             
             return {
                 'success': True,
                 'truth_records': truth_records,
                 'metadata': {
                     'page_count': len(all_text),
-                    'text_length': sum(len(t) for t in all_text)
+                    'text_length': sum(len(t) for t in all_text),
+                    'shows_found': len(shows) if shows else 0
                 },
                 'error': None
             }

@@ -1,0 +1,16 @@
+schema_version: "1.0"
+system_id: TOURTEXT
+classification: canonical_candidate
+canonical_repository: true
+status: active_review
+owner: Jon Hartman
+may_receive_changes: true
+donor_to: null
+successor: null
+governance_version: "Pearl & Pig Governance v0.2"
+approved_on: "2026-07-25"
+conditions:
+  - messaging_compliance_must_remain_explicit
+  - tour_data_access_must_be_owner_scoped
+  - generated_messages_require_traceable_source_context
+notes: "Current connected TourText implementation candidate; repository naming retains Emergent history but does not grant provider authority."
